@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Raw data downloaded from DANDI (too large for GitHub)
+data/
+*.nwb
