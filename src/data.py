@@ -84,3 +84,38 @@ def build_features(trials, n_lags, bin_ms=BIN_MS):
     # Drop any bin with missing values (for example, a history bin that isn't there)
     ok = ~np.isnan(X).any(axis=1) & ~np.isnan(y).any(axis=1)
     return X[ok], y[ok], groups[ok], t_ms[ok]
+
+
+def build_sequences(trials, lag_ms=0, window_bins=1, bin_ms=BIN_MS):
+    """Turn trial data into one time-ordered sequence per trial, for the Kalman filter.
+
+    Each sequence covers the decoding window in steps of `bin_ms` and holds:
+      X : hand state at each step, [pos_x, pos_y, vel_x, vel_y, 1]
+          (the constant 1 lets the linear models include an offset)
+      Z : neural observation at each step: every neuron's spike count summed over
+          the `window_bins` bins ending `lag_ms` before that step. Only past
+          spiking is used, as a real-time decoder would require.
+    Steps with missing data are NaN; the Kalman filter skips its update there.
+
+    Returns a list of dicts with keys: trial_id, t (ms from movement onset), X, Z.
+    """
+    t_all = (trials["align_time"].dt.total_seconds() * 1000).round().astype(int).to_numpy()
+    spikes = trials["spikes"].to_numpy(dtype=float)
+    kin = np.hstack([trials["hand_pos"][["x", "y"]].to_numpy(dtype=float),
+                     trials["hand_vel"][["x", "y"]].to_numpy(dtype=float)])
+    trial_ids = trials["trial_id"].to_numpy()
+    in_window = ~trials["margin"].to_numpy(dtype=bool)
+
+    seqs = []
+    for tid in np.unique(trial_ids):
+        rows = np.flatnonzero(trial_ids == tid)
+        win = rows[in_window[rows]]
+        if len(win) == 0:
+            continue
+        S = pd.DataFrame(spikes[rows], index=t_all[rows])
+        K = pd.DataFrame(kin[win], index=t_all[win])
+        t = np.arange(t_all[win].min(), t_all[win].max() + bin_ms, bin_ms)   # regular time grid
+        Z = sum(S.reindex(t - lag_ms - j * bin_ms).to_numpy() for j in range(window_bins))
+        X = np.hstack([K.reindex(t).to_numpy(), np.ones((len(t), 1))])
+        seqs.append({"trial_id": tid, "t": t, "X": X, "Z": Z})
+    return seqs

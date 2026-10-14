@@ -2,7 +2,7 @@
 
 Predicting a monkey's hand movements from the activity of motor-cortex neurons, using the public **MC_Maze** dataset from the [Neural Latents Benchmark](https://github.com/neurallatents/nlb_tools).
 
-**Status:** Phase 1 (loading, cleaning, and exploring the data) and Phase 2 (a ridge regression decoder) are complete. A ridge decoder with 200 ms of spike history predicts hand velocity on held-out trials with **R² = 0.50**. Phase 3 (a Kalman filter decoder) is next.
+**Status:** Phases 1–3 are complete. The best decoder so far, ridge regression with 400 ms of spike history, predicts hand velocity on held-out trials with **R² = 0.61**. A Kalman filter scored R² = 0.40 on the same trials. Phase 4 (a recurrent neural network) is next.
 
 ![Decoded vs. actual hand velocity on three held-out trials](figures/06_decoded_velocity.png)
 
@@ -48,12 +48,16 @@ motor-cortex-neural-decoding/
 │   ├── 04_tuning.png
 │   ├── 05_r2_vs_history.png
 │   ├── 06_decoded_velocity.png
-│   └── 07_decoded_paths.png
+│   ├── 07_decoded_paths.png
+│   ├── 08_kalman_vs_ridge_velocity.png
+│   └── 09_kalman_vs_ridge_paths.png
 ├── notebooks/
-│   ├── 01_explore.ipynb        # Phase 1: load, clean, align, explore
-│   └── 02_ridge_decoder.ipynb  # Phase 2: ridge regression decoder
+│   ├── 01_explore.ipynb         # Phase 1: load, clean, align, explore
+│   ├── 02_ridge_decoder.ipynb   # Phase 2: ridge regression decoder
+│   └── 03_kalman_decoder.ipynb  # Phase 3: Kalman filter vs. ridge
 ├── src/
-│   └── data.py            # Shared loading, cleaning, and feature-building functions
+│   ├── data.py            # Shared loading, cleaning, and feature-building functions
+│   └── decoders.py        # Ridge baseline and Kalman filter decoder
 ├── requirements.txt
 └── README.md
 ```
@@ -87,7 +91,7 @@ This creates `data/000140/sub-Jenkins/`, which the notebook reads.
 
 **3. Run the notebooks**
 
-Open the notebooks in `notebooks/` in order in VS Code or Jupyter, select the `neurodecode` kernel, and run all cells. Figures are saved to `figures/`. The spike-history experiment in `02_ridge_decoder.ipynb` takes a few minutes.
+Open the notebooks in `notebooks/` in order in VS Code or Jupyter, select the `neurodecode` kernel, and run all cells. Figures are saved to `figures/`. The cross-validation steps in `02_ridge_decoder.ipynb` and `03_kalman_decoder.ipynb` take several minutes.
 
 ---
 
@@ -202,6 +206,54 @@ Adding up velocity over time turns small errors into drift. Several decoded path
 
 ---
 
+## Phase 3: Kalman filter decoder vs. ridge
+
+Notebook: `notebooks/03_kalman_decoder.ipynb`. Shared code: `src/decoders.py`, `src/data.py`.
+
+### Method
+
+- **Same test set:** the same 80 training and 20 held-out test trials as Phase 2 (same random seed).
+- **Kalman filter:** the state is hand position, velocity, and a constant. A movement model (how the state changes each 20 ms step) and a neural model (what spike counts each state produces) are both fit by least squares on training trials. At each step the filter predicts the next state from the movement model, then corrects it with the new spikes.
+- **Kalman settings:** the neural **lag** (0–160 ms) and the **spike window** summed per step (20–140 ms) were chosen by 5-fold cross-validation on the training trials. The best setting was a 160 ms lag and a 60 ms window.
+- **Ridge, revisited:** Phase 2's ridge decoder was still improving at 200 ms of history, so 300 and 400 ms were also tried, choosing by cross-validated R². 400 ms scored best.
+- **Fair comparison:** both decoders were scored on the same 700 test bins.
+
+### Results
+
+| Decoder | Test R² (x) | Test R² (y) | Test R² (mean) |
+| --- | --- | --- | --- |
+| **Ridge, 400 ms of spike history** | **0.686** | **0.525** | **0.606** |
+| Kalman filter, 160 ms lag, 60 ms window | 0.506 | 0.294 | 0.400 |
+
+**Result:** ridge with 400 ms of history is the best decoder so far (R² = 0.61, up from 0.50 with 200 ms). The Kalman filter scored 0.40 on the same bins.
+
+**Figure 8: decoded velocity, ridge and Kalman** (`figures/08_kalman_vs_ridge_velocity.png`)
+
+![Decoded vs. actual velocity: ridge and Kalman](figures/08_kalman_vs_ridge_velocity.png)
+
+Both decoders follow the broad timing of the movement and both undershoot the peaks. Before movement onset, the Kalman filter often reports large velocities while the hand is still.
+
+**Figure 9: reach paths rebuilt from velocity** (`figures/09_kalman_vs_ridge_paths.png`)
+
+![Reach paths: actual, ridge, and Kalman](figures/09_kalman_vs_ridge_paths.png)
+
+Neither decoder reproduces the curved reaches well; both drift as errors accumulate.
+
+### Why the Kalman filter likely underperformed
+
+These are hypotheses, not yet tested:
+
+- **Too many parameters for the data.** The neural noise model has about 10,000 entries (142 × 142 neurons), estimated from roughly 2,800 training bins with no tuned regularization. Ridge's penalty, by contrast, is tuned by cross-validation.
+- **A movement model too simple for reaches.** A linear "next state ≈ A × current state" rule can't represent a reach's rise and fall in speed. Ridge sidesteps this by reading 400 ms of spiking directly.
+- **Planning activity read as movement.** Motor cortex is strongly active while a reach is being prepared, in patterns that don't move the arm ([Kaufman et al., 2014](https://doi.org/10.1038/nn.3643)). The Kalman filter's neural model sees one short spike window at a time, which may explain its spurious velocities before movement.
+- **Lag at the edge of the range tried.** The chosen 160 ms lag was the longest tested.
+
+Kalman filters have done well in closed-loop brain-computer interfaces, where users see the cursor and correct errors as they happen. An offline test like this one can't capture that.
+
+**Note on the 400 ms history:** for the earliest bins in the window, 400 ms of history reaches back into the planning period before the reach. That's still past activity, available in real time, but it means the decoder draws on planning-related as well as movement-related signals.
+
+---
+
 ## Key terms
 
 - **Spike count / binning:** the number of times a neuron fires within a time window (here, 20 ms).
@@ -213,6 +265,7 @@ Adding up velocity over time turns small errors into drift. Several decoded path
 - **Ridge regression:** linear regression with a penalty (alpha) that shrinks weights toward zero, which keeps the model from fitting noise when there are many correlated inputs.
 - **Cross-validation:** repeatedly training on part of the training data and scoring on the rest, to choose settings without touching the test set.
 - **R²:** the share of the variation in the true values that the predictions explain (1 = perfect, 0 = no better than always predicting the average).
+- **Kalman filter:** a decoder that keeps a running estimate of the hand's state, predicting each next step from a movement model and correcting it with the new spikes.
 
 ---
 
@@ -220,8 +273,8 @@ Adding up velocity over time turns small errors into drift. Several decoded path
 
 - [x] **Phase 1:** load, clean, align, and explore the data (Sep 2026)
 - [x] **Phase 2:** ridge regression baseline predicting hand velocity from binned spikes, scored with R² on held-out trials (Oct 2026; R² = 0.50)
-- [ ] **Next for Phase 2:** try longer spike histories and smoothed spike inputs
-- [ ] **Phase 3:** Kalman filter decoder
+- [x] **Phase 3:** Kalman filter decoder, compared with ridge on identical test bins; ridge with 400 ms of history scored best (Oct 2026; R² = 0.61 vs. 0.40)
+- [ ] **Next for Phase 3:** test whether a simpler Kalman noise model (fewer parameters) and longer lags close the gap
 - [ ] **Phase 4:** recurrent neural network decoder
 - [ ] **Later:** decode behavior from mouse Neuropixels recordings, using pose-tracking (SLEAP) and behavior-segmentation (Keypoint MoSeq) outputs
 
