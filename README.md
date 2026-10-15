@@ -2,9 +2,9 @@
 
 Predicting a monkey's hand movements from the activity of motor-cortex neurons, using the public **MC_Maze** dataset from the [Neural Latents Benchmark](https://github.com/neurallatents/nlb_tools).
 
-**Status:** Phases 1–3 are complete. The best decoder so far, ridge regression with 400 ms of spike history, predicts hand velocity on held-out trials with **R² = 0.61**. A Kalman filter scored R² = 0.40 on the same trials, and a follow-up ruled out two explanations for the gap. Phase 4 (a recurrent neural network) is next.
+**Status:** Phases 1–4 are complete. The best decoder, a recurrent neural network (GRU, built in PyTorch), predicts hand velocity on held-out trials with **R² = 0.75**, compared with 0.61 for ridge regression and 0.40 for a Kalman filter on the same test bins. A timing control confirmed the network's advantage comes from the neural data, not from trial structure.
 
-![Decoded vs. actual hand velocity on three held-out trials](figures/06_decoded_velocity.png)
+![Decoded vs. actual hand velocity on three held-out trials: ridge, Kalman filter, and GRU](figures/12_decoder_comparison_velocity.png)
 
 ---
 
@@ -51,15 +51,22 @@ motor-cortex-neural-decoding/
 │   ├── 07_decoded_paths.png
 │   ├── 08_kalman_vs_ridge_velocity.png
 │   ├── 09_kalman_vs_ridge_paths.png
-│   └── 10_kalman_noise_models.png
+│   ├── 10_kalman_noise_models.png
+│   ├── 11_gru_learning_curves.png
+│   ├── 12_decoder_comparison_velocity.png
+│   ├── 13_decoder_comparison_r2.png
+│   └── 14_gru_timing_control.png
 ├── notebooks/
 │   ├── 01_explore.ipynb         # Phase 1: load, clean, align, explore
 │   ├── 02_ridge_decoder.ipynb   # Phase 2: ridge regression decoder
 │   ├── 03_kalman_decoder.ipynb  # Phase 3: Kalman filter vs. ridge
-│   └── 03b_kalman_followup.ipynb  # Phase 3b: testing why the Kalman filter scored lower
+│   ├── 03b_kalman_followup.ipynb  # Phase 3b: testing why the Kalman filter scored lower
+│   ├── 04_rnn_decoder.ipynb       # Phase 4: GRU decoder vs. ridge and Kalman
+│   └── 04b_gru_timing_control.ipynb  # Phase 4b: timing control for the GRU
 ├── src/
 │   ├── data.py            # Shared loading, cleaning, and feature-building functions
-│   └── decoders.py        # Ridge baseline and Kalman filter decoder
+│   ├── decoders.py        # Ridge baseline and Kalman filter decoder
+│   └── rnn.py             # GRU decoder (PyTorch)
 ├── requirements.txt
 └── README.md
 ```
@@ -81,6 +88,14 @@ pip install --no-deps nlb_tools
 
 `nlb_tools` was written for older versions of pandas and NumPy, so `requirements.txt` pins `pandas==1.5.3` and `numpy<2`. Installing `nlb_tools` with `--no-deps` stops it from replacing those pinned versions.
 
+`requirements.txt` also includes PyTorch, used in Phase 4. This project only needs the CPU version, which is a much smaller download. To get it, run this before `pip install -r requirements.txt`:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+On Windows, import `torch` before other libraries in a notebook. Importing it after them can fail with `WinError 1114` (a known issue in recent PyTorch versions).
+
 **2. Download the data** (run from the repository root)
 
 ```bash
@@ -93,7 +108,7 @@ This creates `data/000140/sub-Jenkins/`, which the notebook reads.
 
 **3. Run the notebooks**
 
-Open the notebooks in `notebooks/` in order in VS Code or Jupyter, select the `neurodecode` kernel, and run all cells. Figures are saved to `figures/`. The cross-validation steps in `02_ridge_decoder.ipynb` and `03_kalman_decoder.ipynb` take several minutes.
+Open the notebooks in `notebooks/` in order in VS Code or Jupyter, select the `neurodecode` kernel, and run all cells. Figures are saved to `figures/`. The cross-validation and training steps in notebooks 02–04b take several minutes each.
 
 ---
 
@@ -194,7 +209,9 @@ Notebook: `notebooks/02_ridge_decoder.ipynb`. Shared code: `src/data.py`.
 
 Accuracy rises steadily with history and had not leveled off at 200 ms, the longest history tried. Two things likely drive this: motor cortex activity leads movement, and adding up spikes over more bins averages out spike-count noise. Test R² runs a little below cross-validated R²; with only 20 test trials, the test score itself carries real uncertainty.
 
-**Figure 6: decoded vs. actual velocity** (`figures/06_decoded_velocity.png`, shown at the top of this page)
+**Figure 6: decoded vs. actual velocity** (`figures/06_decoded_velocity.png`)
+
+![Decoded vs. actual hand velocity](figures/06_decoded_velocity.png)
 
 On several test trials the decoded velocity follows the timing and shape of the real movement, but its peaks are too small. Ridge regression pulls predictions toward the average, which shrinks large values. The decoder also predicts some movement before the hand starts moving.
 
@@ -283,6 +300,81 @@ All rows are scored on the same 700 test bins.
 
 ---
 
+## Phase 4: recurrent neural network (GRU) decoder
+
+Notebook: `notebooks/04_rnn_decoder.ipynb`. Shared code: `src/rnn.py`, `src/data.py`.
+
+### Method
+
+- **Network:** a GRU reads all 142 neurons' spike counts one 20 ms bin at a time, starting 400 ms before the decoding window, and outputs hand velocity at every bin. It only looks backward in time, as a real-time decoder must. A linear readout maps its hidden state to velocity.
+- **Inputs and targets:** spike counts and velocity are standardized (mean 0, standard deviation 1) using training trials only.
+- **Splits:** the same 20 test trials as every earlier phase. 16 of the 80 training trials were held back as a validation set for choosing settings.
+- **Tuning:** 32, 64, or 128 hidden units, each with and without dropout (0.3), trained with the AdamW optimizer and early stopping on validation error.
+- **Final model:** the chosen network was retrained on all 80 training trials five times with different random seeds. The five networks' predictions were averaged (an ensemble).
+- **Comparison:** ridge (400 ms of history) and the Kalman filter (shrinkage noise model, 160 ms lag) were refit with their best settings and scored on the same 700 test bins.
+
+### Tuning (validation set)
+
+| Hidden units | Dropout | Best epoch | Validation R² (x) | Validation R² (y) | Validation R² (mean) |
+| --- | --- | --- | --- | --- | --- |
+| 32 | 0 | 24 | 0.422 | 0.300 | 0.361 |
+| 32 | 0.3 | 459 | 0.840 | 0.837 | 0.839 |
+| 64 | 0 | 56 | 0.631 | 0.416 | 0.524 |
+| 64 | 0.3 | 173 | 0.837 | 0.785 | 0.811 |
+| 128 | 0 | 44 | 0.653 | 0.577 | 0.615 |
+| **128** | **0.3** | **146** | **0.880** | **0.843** | **0.861** |
+
+### Results (same 700 test bins)
+
+| Decoder | Test R² (x) | Test R² (y) | Test R² (mean) |
+| --- | --- | --- | --- |
+| **GRU, 128 units, 5-network ensemble** | **0.845** | **0.674** | **0.759** |
+| Ridge, 400 ms history | 0.686 | 0.525 | 0.606 |
+| Kalman filter, shrinkage noise, 160 ms lag | 0.508 | 0.301 | 0.405 |
+
+Single GRU networks scored 0.730 ± 0.012 (mean ± SD over 5 seeds; range 0.709–0.737), so every one of them beat ridge.
+
+**Figure 11: learning curves** (`figures/11_gru_learning_curves.png`)
+
+![GRU learning curves](figures/11_gru_learning_curves.png)
+
+Error on the fitting trials falls almost to zero while validation error levels off around 0.17. The network has enough capacity to memorize the training trials, so dropout and early stopping were essential: without dropout, validation R² was only 0.36–0.62.
+
+**Figure 12: decoded velocity, all three decoders** (`figures/12_decoder_comparison_velocity.png`, shown at the top of this page)
+
+The GRU stays near zero before the hand starts moving, where ridge and especially the Kalman filter report spurious movement, and it gets closer to the true peaks. All three decoders miss some movements, such as the large y velocity in test trial 3, and y velocity remains harder to decode than x.
+
+**Figure 13: R² by decoder** (`figures/13_decoder_comparison_r2.png`)
+
+![Decoder comparison](figures/13_decoder_comparison_r2.png)
+
+**Interpretation:** the GRU's advantage is consistent with the Phase 3b conclusion that linear movement dynamics and short spike windows were limiting. A network that learns its own, nonlinear dynamics from long spike histories decodes better. Validation R² (0.86) was higher than test R² (0.73 per network) because the validation trials were used to choose settings and number only 16. The test score is the unbiased estimate.
+
+### Timing control (Phase 4b)
+
+Notebook: `notebooks/04b_gru_timing_control.ipynb`.
+
+**Concern:** every GRU input sequence started exactly 650 ms before movement onset. A recurrent network could learn *when* movement begins from its position in the sequence instead of from the neurons, information a real brain-computer interface wouldn't have. Ridge can't use this shortcut, because its inputs are spike counts only.
+
+**Test:** each sequence was given a random start (400–800 ms of history before the window), drawn separately for every trial. Each training trial was included three times with different random starts. The network was then retrained, with early stopping, and tested on the same 700 bins.
+
+| GRU version | Test R² (x) | Test R² (y) | Test R² (mean) | Single networks (mean ± SD) |
+| --- | --- | --- | --- | --- |
+| Fixed start (Phase 4) | 0.845 | 0.674 | 0.759 | 0.730 ± 0.012 |
+| **Random start (control)** | **0.828** | **0.669** | **0.748** | **0.717 ± 0.021** |
+
+![Timing control](figures/14_gru_timing_control.png)
+
+**Result:** R² changed by only −0.01, less than the spread between individual networks. The GRU was not relying on sequence timing, and its advantage over ridge (0.61) holds. The controlled value, **R² = 0.75**, is the conservative figure to report.
+
+### Limitations
+
+- One monkey, one session, and 100 trials. The results may not carry over to other animals, sessions, or larger datasets.
+- Offline decoding only. A real brain-computer interface runs in closed loop, where the user sees the output and corrects it, and that can change which decoder works best.
+- The 32-unit network with dropout trained until near the 500-epoch limit (best epoch 459), so with more epochs it might have scored slightly higher.
+
+---
+
 ## Key terms
 
 - **Spike count / binning:** the number of times a neuron fires within a time window (here, 20 ms).
@@ -295,6 +387,10 @@ All rows are scored on the same 700 test bins.
 - **Cross-validation:** repeatedly training on part of the training data and scoring on the rest, to choose settings without touching the test set.
 - **R²:** the share of the variation in the true values that the predictions explain (1 = perfect, 0 = no better than always predicting the average).
 - **Kalman filter:** a decoder that keeps a running estimate of the hand's state, predicting each next step from a movement model and correcting it with the new spikes.
+- **Recurrent neural network (GRU):** a neural network that reads a sequence one step at a time and carries a memory (hidden state) forward, so each output can depend on everything before it. A GRU (gated recurrent unit) is a common, compact type.
+- **Validation set:** training trials held back to choose settings and decide when to stop training, so the test trials stay untouched until the end.
+- **Dropout and early stopping:** two guards against overfitting. Dropout randomly silences inputs during training; early stopping halts training once validation error stops improving.
+- **Ensemble:** averaging the predictions of several separately trained networks, which usually beats any single one.
 
 ---
 
@@ -304,7 +400,8 @@ All rows are scored on the same 700 test bins.
 - [x] **Phase 2:** ridge regression baseline predicting hand velocity from binned spikes, scored with R² on held-out trials (Oct 2026; R² = 0.50)
 - [x] **Phase 3:** Kalman filter decoder, compared with ridge on identical test bins; ridge with 400 ms of history scored best (Oct 2026; R² = 0.61 vs. 0.40)
 - [x] **Phase 3b:** tested two explanations for the Kalman filter's lower score; a simpler noise model did not help, and the best lag stayed at 160 ms across 0–280 ms (Oct 2026)
-- [ ] **Phase 4:** recurrent neural network decoder
+- [x] **Phase 4:** recurrent neural network (GRU) decoder; best of the three decoders (Oct 2026; R² = 0.76 vs. 0.61 ridge and 0.40 Kalman)
+- [x] **Phase 4b:** timing control; the GRU's advantage held with randomized sequence starts (R² = 0.75)
 - [ ] **Later:** decode behavior from mouse Neuropixels recordings, using pose-tracking (SLEAP) and behavior-segmentation (Keypoint MoSeq) outputs
 
 ---
@@ -313,7 +410,7 @@ All rows are scored on the same 700 test bins.
 
 - Data: [DANDI Archive, Dandiset 000140](https://dandiarchive.org/dandiset/000140). See the Dandiset page for the original data citation.
 - Benchmark and loading code: [Neural Latents Benchmark, `nlb_tools`](https://github.com/neurallatents/nlb_tools); Pei et al. (2021), *Neural Latents Benchmark '21*, [arXiv:2109.04463](https://arxiv.org/abs/2109.04463).
-- Python libraries: pandas, NumPy, matplotlib, scikit-learn, pynwb, dandi.
+- Python libraries: pandas, NumPy, matplotlib, scikit-learn, PyTorch, pynwb, dandi.
 
 ---
 
