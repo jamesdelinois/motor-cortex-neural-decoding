@@ -2,7 +2,7 @@
 
 Predicting a monkey's hand movements from the activity of motor-cortex neurons, using the public **MC_Maze** dataset from the [Neural Latents Benchmark](https://github.com/neurallatents/nlb_tools).
 
-**Status:** Phases 1–4 are complete. The best decoder, a recurrent neural network (GRU, built in PyTorch), predicts hand velocity on held-out trials with **R² = 0.75**, compared with 0.61 for ridge regression and 0.40 for a Kalman filter on the same test bins. A timing control confirmed the network's advantage comes from the neural data, not from trial structure.
+**Status:** All five phases are complete. The best decoder, a recurrent neural network (GRU, built in PyTorch), predicts hand velocity on held-out trials with **R² = 0.75**, compared with 0.61 for ridge regression and 0.40 for a Kalman filter on the same test bins. A timing control confirmed the network's advantage comes from the neural data, not from trial structure. A population-dynamics analysis shows the neurons' collective activity changes about 270 ms before the hand moves, separates by reach direction before movement begins, and rotates during the reach.
 
 ![Decoded vs. actual hand velocity on three held-out trials: ridge, Kalman filter, and GRU](figures/12_decoder_comparison_velocity.png)
 
@@ -17,6 +17,7 @@ This project builds that pipeline step by step:
 1. Load and clean the neural and movement recordings, and line them up in time.
 2. Confirm that individual neurons carry information about reach direction.
 3. Train decoders that predict **hand velocity** from population activity, starting simple (linear regression) and working up (Kalman filter, recurrent neural network).
+4. Describe how the population as a whole is organized: how many dimensions its activity uses, the paths it traces, when it changes relative to the hand, and whether it rotates.
 
 ---
 
@@ -55,18 +56,25 @@ motor-cortex-neural-decoding/
 │   ├── 11_gru_learning_curves.png
 │   ├── 12_decoder_comparison_velocity.png
 │   ├── 13_decoder_comparison_r2.png
-│   └── 14_gru_timing_control.png
+│   ├── 14_gru_timing_control.png
+│   ├── 15_variance_explained.png
+│   ├── 16_neural_trajectories.png
+│   ├── 17_neural_vs_hand_speed.png
+│   ├── 18_decoding_vs_dimensions.png
+│   └── 19_jpca_rotations.png
 ├── notebooks/
 │   ├── 01_explore.ipynb         # Phase 1: load, clean, align, explore
 │   ├── 02_ridge_decoder.ipynb   # Phase 2: ridge regression decoder
 │   ├── 03_kalman_decoder.ipynb  # Phase 3: Kalman filter vs. ridge
 │   ├── 03b_kalman_followup.ipynb  # Phase 3b: testing why the Kalman filter scored lower
 │   ├── 04_rnn_decoder.ipynb       # Phase 4: GRU decoder vs. ridge and Kalman
-│   └── 04b_gru_timing_control.ipynb  # Phase 4b: timing control for the GRU
+│   ├── 04b_gru_timing_control.ipynb  # Phase 4b: timing control for the GRU
+│   └── 05_population_dynamics.ipynb  # Phase 5: PCA, trajectories, timing, jPCA
 ├── src/
 │   ├── data.py            # Shared loading, cleaning, and feature-building functions
 │   ├── decoders.py        # Ridge baseline and Kalman filter decoder
-│   └── rnn.py             # GRU decoder (PyTorch)
+│   ├── rnn.py             # GRU decoder (PyTorch)
+│   └── dynamics.py        # Condition averages, PCA, and jPCA
 ├── requirements.txt
 └── README.md
 ```
@@ -375,6 +383,79 @@ Notebook: `notebooks/04b_gru_timing_control.ipynb`.
 
 ---
 
+## Phase 5: population dynamics
+
+Notebook: `notebooks/05_population_dynamics.ipynb`. Shared code: `src/dynamics.py`.
+
+Phases 2–4 asked how well the neurons predict the hand. This phase asks how the population as a whole is organized.
+
+### Method
+
+- **Condition averages:** trials were grouped into the same five reach-direction bins as Phase 1 (16–30 trials each). Each neuron's firing rate was smoothed with a 20 ms Gaussian kernel and averaged within each bin, from 400 ms before to 500 ms after movement onset.
+- **Soft normalization:** each neuron was divided by its range of average rates plus 5 Hz, so a few high-firing neurons don't dominate.
+- **PCA** on the condition-averaged activity of all 142 neurons.
+- **Timing:** "neural speed" (how fast the population state moves through the top 10 PCs) was compared with hand speed, using the time each first reaches half its peak.
+- **Decoding from a few dimensions:** the 400 ms ridge decoder from Phase 3 was refit on only the top *k* PCs of the spike counts. The PCs were computed from training trials only and scored on the same 700 test bins.
+- **jPCA**, following [Churchland et al. (2012)](https://www.nature.com/articles/nature11129): from 60 ms before to 200 ms after movement onset, after removing the across-condition average and reducing to the top 6 PCs. The population's bin-to-bin change was fit with a pure-rotation model and with unconstrained linear dynamics.
+
+### Results
+
+| Measure | Result |
+| --- | --- |
+| Variance captured by PC1–3 | 37% |
+| PCs needed for 90% of the variance | 37 of 142 |
+| Population lead over the hand (half-peak speed) | about 270 ms |
+| Decoding R² from the top 10 PCs / top 40 PCs / all 142 neurons | 0.42 / 0.52 / 0.61 |
+| jPCA fit of bin-to-bin change: rotation only vs. any linear dynamics | R² = 0.32 vs. 0.38 (rotation captures 85%) |
+| jPC plane's share of the top-6-PC variance | 27% |
+| Rotation frequency | about 1.5 cycles per second |
+
+**Figure 15: variance explained** (`figures/15_variance_explained.png`)
+
+![Variance explained by each principal component](figures/15_variance_explained.png)
+
+Variance is spread gradually: the top 3 PCs capture 37%, the top 10 nearly two-thirds, and 37 PCs are needed for 90%. With only 16–30 trials per condition, averaging leaves noise spread across many dimensions, so the 90% figure likely overstates how many dimensions the structured activity really uses.
+
+**Figure 16: neural trajectories** (`figures/16_neural_trajectories.png`)
+
+![Neural trajectories](figures/16_neural_trajectories.png)
+
+All five reach directions start from nearly the same state. In PC1 and PC2 they then travel a similar large arc, so the biggest components mostly reflect activity *shared* by every reach. That is consistent with reports that the largest response component in motor cortex reflects movement timing rather than movement type ([Kaufman et al., 2016](https://www.eneuro.org/content/3/4/ENEURO.0085-16.2016)). PC3 separates rightward reaches (−22°, 22°) from leftward and upward ones (112°, 158°, −158°), and that separation is already visible at movement onset: the population "commits" to a direction before the hand moves.
+
+**Figure 17: population activity leads the hand** (`figures/17_neural_vs_hand_speed.png`)
+
+![Neural speed vs. hand speed](figures/17_neural_vs_hand_speed.png)
+
+Neural speed reaches half its peak about 210 ms *before* movement onset; hand speed reaches half its peak about 60 ms after, a lead of about 270 ms. Part of the early change likely reflects the transition from preparing to moving after the go cue. This lead explains why the decoders benefited from long spike histories (400 ms for ridge) and why the Kalman filter chose a 160 ms lag.
+
+**Figure 18: decoding from a few dimensions** (`figures/18_decoding_vs_dimensions.png`)
+
+![Decoding accuracy vs. number of dimensions](figures/18_decoding_vs_dimensions.png)
+
+| Dimensions (k) | 1 | 2 | 5 | 10 | 20 | 40 | All 142 neurons |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Test R² (mean) | 0.00 | 0.10 | 0.38 | 0.42 | 0.49 | 0.52 | 0.61 |
+
+The top few dimensions carry little velocity information: 10 PCs recover about 70% of the full decoder's accuracy, and 40 recover about 85%. The highest-variance patterns are not the velocity patterns, which fits Figure 16: the largest components mostly reflect shared, timing-related activity, while direction-specific information sits in smaller ones.
+
+**Figure 19: rotational dynamics (jPCA)** (`figures/19_jpca_rotations.png`)
+
+![jPCA rotations](figures/19_jpca_rotations.png)
+
+In the jPC plane, the trajectories mostly circle in the same direction (clockwise in this view), the signature jPCA looks for. A pure-rotation model captures 85% of what unconstrained linear dynamics capture, and the plane holds 27% of the top-6-PC variance, so the rotation sits in meaningful dimensions rather than noise. This is consistent with Churchland et al. (2012), but with only five conditions it is a rough estimate, and what such rotations mean has been debated ([Lebedev et al., 2019](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6908571/)).
+
+### Limitations
+
+- Only five reach-direction conditions, far fewer than the original jPCA study, and 16–30 trials per condition.
+- Smoothing is centered in time, so the lead estimate is approximate to within a few tens of milliseconds, and the half-peak definition affects the exact number.
+- Neural speed includes changes shared by all reaches, such as the response to the go cue, not just movement-specific activity.
+
+### How the phases fit together
+
+The population starts changing well before the hand, and much of its largest activity is shared across reaches rather than specific to direction. That explains three earlier findings: spike history helped every decoder, the Kalman filter mistook pre-movement activity for movement, and the GRU, which learns its own dynamics from long histories, decoded best.
+
+---
+
 ## Key terms
 
 - **Spike count / binning:** the number of times a neuron fires within a time window (here, 20 ms).
@@ -391,6 +472,10 @@ Notebook: `notebooks/04b_gru_timing_control.ipynb`.
 - **Validation set:** training trials held back to choose settings and decide when to stop training, so the test trials stay untouched until the end.
 - **Dropout and early stopping:** two guards against overfitting. Dropout randomly silences inputs during training; early stopping halts training once validation error stops improving.
 - **Ensemble:** averaging the predictions of several separately trained networks, which usually beats any single one.
+- **PCA (principal component analysis):** finds the directions in the 142-neuron space along which activity varies most. Each principal component is a weighted mix of neurons.
+- **Neural trajectory:** the path the population's activity traces through the top principal components over time.
+- **Condition average:** a neuron's firing rate averaged over all trials of the same type (here, reach-direction bin).
+- **jPCA:** a method that looks for a plane in which the population state rotates, by fitting its bin-to-bin change with a pure-rotation model.
 
 ---
 
@@ -402,7 +487,9 @@ Notebook: `notebooks/04b_gru_timing_control.ipynb`.
 - [x] **Phase 3b:** tested two explanations for the Kalman filter's lower score; a simpler noise model did not help, and the best lag stayed at 160 ms across 0–280 ms (Oct 2026)
 - [x] **Phase 4:** recurrent neural network (GRU) decoder; best of the three decoders (Oct 2026; R² = 0.76 vs. 0.61 ridge and 0.40 Kalman)
 - [x] **Phase 4b:** timing control; the GRU's advantage held with randomized sequence starts (R² = 0.75)
-- [ ] **Later:** decode behavior from mouse Neuropixels recordings, using pose-tracking (SLEAP) and behavior-segmentation (Keypoint MoSeq) outputs
+- [x] **Phase 5:** population dynamics: dimensionality, neural trajectories, neural vs. hand timing, decoding from top dimensions, and jPCA (Oct 2026)
+- [ ] **Future direction:** decode behavior from mouse Neuropixels recordings, using pose-tracking (SLEAP) and behavior-segmentation (Keypoint MoSeq) outputs
+- [ ] **Future direction:** rerun the decoders on the larger MC_Maze datasets to test whether the GRU's advantage grows with more training data
 
 ---
 
