@@ -1,5 +1,6 @@
 """Decoders shared across notebooks: a ridge regression baseline and a Kalman filter."""
 import numpy as np
+from sklearn.covariance import LedoitWolf
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import GridSearchCV, GroupKFold
 from sklearn.pipeline import make_pipeline
@@ -31,10 +32,19 @@ class KalmanDecoder:
     At each time step the filter predicts the next state from the movement model, then
     corrects that prediction using the new spikes, weighting each source by how reliable
     it has been.
+
+    noise : how the neural noise covariance Q is estimated
+        "full"      every neuron pair's covariance (about n x n numbers; the original)
+        "diagonal"  each neuron's own variance only (n numbers; neurons treated as independent)
+        "shrinkage" full covariance shrunk toward a simpler target (Ledoit-Wolf), with the
+                    amount of shrinkage chosen automatically from the data
     """
 
-    def __init__(self, q_reg=1e-3):
+    def __init__(self, q_reg=1e-3, noise="full"):
+        if noise not in ("full", "diagonal", "shrinkage"):
+            raise ValueError("noise must be 'full', 'diagonal', or 'shrinkage'")
         self.q_reg = q_reg  # small amount added to Q so it can always be inverted
+        self.noise = noise
 
     @staticmethod
     def _valid(a):
@@ -56,7 +66,14 @@ class KalmanDecoder:
         self.A = np.linalg.lstsq(prev, nxt, rcond=None)[0].T
         self.W = np.cov((nxt - prev @ self.A.T).T)
         self.H = np.linalg.lstsq(xs, zs, rcond=None)[0].T
-        self.Q = np.cov((zs - xs @ self.H.T).T) + self.q_reg * np.eye(zs.shape[1])
+        resid = zs - xs @ self.H.T
+        if self.noise == "full":
+            Q = np.cov(resid.T)
+        elif self.noise == "diagonal":
+            Q = np.diag(resid.var(axis=0, ddof=1))
+        else:
+            Q = LedoitWolf().fit(resid).covariance_
+        self.Q = Q + self.q_reg * np.eye(zs.shape[1])
         firsts = np.array(firsts)
         self.x0 = firsts.mean(axis=0)                 # typical starting state
         self.P0 = np.cov(firsts.T)                    # and how much it varies

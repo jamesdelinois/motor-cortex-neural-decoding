@@ -2,7 +2,7 @@
 
 Predicting a monkey's hand movements from the activity of motor-cortex neurons, using the public **MC_Maze** dataset from the [Neural Latents Benchmark](https://github.com/neurallatents/nlb_tools).
 
-**Status:** Phases 1–3 are complete. The best decoder so far, ridge regression with 400 ms of spike history, predicts hand velocity on held-out trials with **R² = 0.61**. A Kalman filter scored R² = 0.40 on the same trials. Phase 4 (a recurrent neural network) is next.
+**Status:** Phases 1–3 are complete. The best decoder so far, ridge regression with 400 ms of spike history, predicts hand velocity on held-out trials with **R² = 0.61**. A Kalman filter scored R² = 0.40 on the same trials, and a follow-up ruled out two explanations for the gap. Phase 4 (a recurrent neural network) is next.
 
 ![Decoded vs. actual hand velocity on three held-out trials](figures/06_decoded_velocity.png)
 
@@ -50,11 +50,13 @@ motor-cortex-neural-decoding/
 │   ├── 06_decoded_velocity.png
 │   ├── 07_decoded_paths.png
 │   ├── 08_kalman_vs_ridge_velocity.png
-│   └── 09_kalman_vs_ridge_paths.png
+│   ├── 09_kalman_vs_ridge_paths.png
+│   └── 10_kalman_noise_models.png
 ├── notebooks/
 │   ├── 01_explore.ipynb         # Phase 1: load, clean, align, explore
 │   ├── 02_ridge_decoder.ipynb   # Phase 2: ridge regression decoder
-│   └── 03_kalman_decoder.ipynb  # Phase 3: Kalman filter vs. ridge
+│   ├── 03_kalman_decoder.ipynb  # Phase 3: Kalman filter vs. ridge
+│   └── 03b_kalman_followup.ipynb  # Phase 3b: testing why the Kalman filter scored lower
 ├── src/
 │   ├── data.py            # Shared loading, cleaning, and feature-building functions
 │   └── decoders.py        # Ridge baseline and Kalman filter decoder
@@ -241,7 +243,7 @@ Neither decoder reproduces the curved reaches well; both drift as errors accumul
 
 ### Why the Kalman filter likely underperformed
 
-These are hypotheses, not yet tested:
+These were the leading hypotheses. Phase 3b (below) tested the first and the last:
 
 - **Too many parameters for the data.** The neural noise model has about 10,000 entries (142 × 142 neurons), estimated from roughly 2,800 training bins with no tuned regularization. Ridge's penalty, by contrast, is tuned by cross-validation.
 - **A movement model too simple for reaches.** A linear "next state ≈ A × current state" rule can't represent a reach's rise and fall in speed. Ridge sidesteps this by reading 400 ms of spiking directly.
@@ -251,6 +253,33 @@ These are hypotheses, not yet tested:
 Kalman filters have done well in closed-loop brain-computer interfaces, where users see the cursor and correct errors as they happen. An offline test like this one can't capture that.
 
 **Note on the 400 ms history:** for the earliest bins in the window, 400 ms of history reaches back into the planning period before the reach. That's still past activity, available in real time, but it means the decoder draws on planning-related as well as movement-related signals.
+
+### Follow-up (Phase 3b): testing two explanations
+
+Notebook: `notebooks/03b_kalman_followup.ipynb`.
+
+Three versions of the Kalman filter's neural noise model were compared, each with its lag (0–280 ms) and spike window (20–140 ms) chosen by 5-fold cross-validation on the training trials:
+
+- **Full:** the original, with every neuron pair's covariance (about 10,000 numbers).
+- **Diagonal:** each neuron's own variance only (142 numbers), treating neurons as independent.
+- **Shrinkage:** the full estimate pulled toward a simpler one (Ledoit-Wolf), by an amount chosen from the data.
+
+| Decoder | Lag (ms) | Window (ms) | Cross-validated R² | Test R² (x) | Test R² (y) | Test R² (mean) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Kalman, full noise (original) | 160 | 60 | 0.457 | 0.506 | 0.294 | 0.400 |
+| Kalman, diagonal noise | 160 | 60 | 0.431 | 0.500 | 0.145 | 0.323 |
+| Kalman, shrinkage noise | 160 | 60 | 0.467 | 0.508 | 0.301 | 0.405 |
+| **Ridge, 400 ms history (Phase 3)** | | | | **0.686** | **0.525** | **0.606** |
+
+All rows are scored on the same 700 test bins.
+
+![Kalman noise models vs. ridge](figures/10_kalman_noise_models.png)
+
+**Findings:**
+
+- **Too many parameters: not supported.** Shrinkage matched the original (0.405 vs. 0.400), and the diagonal model did worse (0.323), mostly in y velocity (0.145 vs. 0.294). Overfitting the noise model is not what holds the Kalman filter back. The correlations between neurons that the full model captures actually help, likely by letting the filter discount fluctuations shared across many neurons.
+- **Lag at the edge: settled.** With lags up to 280 ms, all three versions still chose 160 ms, and cross-validated R² fell at longer lags. 160 ms is a genuine best, not an artifact of the range.
+- **What remains:** the Kalman filter's simple linear movement model and its short spike window (60 ms, versus ridge's 400 ms of history), along with the possibility that it reads planning activity as movement. A recurrent neural network (Phase 4) can learn its own movement dynamics from long spike histories, which tests these directly.
 
 ---
 
@@ -274,7 +303,7 @@ Kalman filters have done well in closed-loop brain-computer interfaces, where us
 - [x] **Phase 1:** load, clean, align, and explore the data (Sep 2026)
 - [x] **Phase 2:** ridge regression baseline predicting hand velocity from binned spikes, scored with R² on held-out trials (Oct 2026; R² = 0.50)
 - [x] **Phase 3:** Kalman filter decoder, compared with ridge on identical test bins; ridge with 400 ms of history scored best (Oct 2026; R² = 0.61 vs. 0.40)
-- [ ] **Next for Phase 3:** test whether a simpler Kalman noise model (fewer parameters) and longer lags close the gap
+- [x] **Phase 3b:** tested two explanations for the Kalman filter's lower score; a simpler noise model did not help, and the best lag stayed at 160 ms across 0–280 ms (Oct 2026)
 - [ ] **Phase 4:** recurrent neural network decoder
 - [ ] **Later:** decode behavior from mouse Neuropixels recordings, using pose-tracking (SLEAP) and behavior-segmentation (Keypoint MoSeq) outputs
 
