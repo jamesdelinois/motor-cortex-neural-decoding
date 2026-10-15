@@ -119,3 +119,59 @@ def build_sequences(trials, lag_ms=0, window_bins=1, bin_ms=BIN_MS):
         X = np.hstack([K.reindex(t).to_numpy(), np.ones((len(t), 1))])
         seqs.append({"trial_id": tid, "t": t, "X": X, "Z": Z})
     return seqs
+
+
+def build_rnn_sequences(trials, history_ms, bin_ms=BIN_MS):
+    """One sequence per trial for the recurrent network.
+
+    Each sequence runs from `history_ms` before the decoding window through the end of the
+    window, in steps of `bin_ms`, and holds:
+      S      : spike counts of every neuron in each bin (the network's input)
+      V      : hand velocity (x, y) in each bin (NaN outside the window)
+      scored : True for bins inside the decoding window with known velocity; only these
+               bins count toward training loss and R²
+    The extra history lets the network see spiking from before the window starts.
+
+    Returns a list of dicts with keys: trial_id, t (ms from movement onset), S, V, scored.
+    """
+    t_all = (trials["align_time"].dt.total_seconds() * 1000).round().astype(int).to_numpy()
+    spikes = trials["spikes"].to_numpy(dtype=float)
+    vel = trials["hand_vel"][["x", "y"]].to_numpy(dtype=float)
+    trial_ids = trials["trial_id"].to_numpy()
+    in_window = ~trials["margin"].to_numpy(dtype=bool)
+
+    seqs = []
+    for tid in np.unique(trial_ids):
+        rows = np.flatnonzero(trial_ids == tid)
+        win = rows[in_window[rows]]
+        if len(win) == 0:
+            continue
+        t = np.arange(t_all[win].min() - history_ms, t_all[win].max() + bin_ms, bin_ms)
+        S = pd.DataFrame(spikes[rows], index=t_all[rows]).reindex(t).to_numpy()
+        V = pd.DataFrame(vel[win], index=t_all[win]).reindex(t).to_numpy()
+        scored = np.isin(t, t_all[win]) & ~np.isnan(V).any(axis=1)
+        seqs.append({"trial_id": tid, "t": t, "S": S, "V": V, "scored": scored})
+    return seqs
+
+
+def pad_sequences(seqs, s_key="S", v_key="V"):
+    """Stack sequences of different lengths into fixed-size arrays, padding the end with zeros.
+
+    Returns X (trials x bins x neurons), Y (trials x bins x 2), M (trials x bins, True where
+    scored), and T (trials x bins, time in ms; NaN in padding). Missing values become 0, and
+    padding is never scored, so it doesn't affect training or evaluation. Padding goes at the
+    end, so it can't influence earlier outputs of a forward-in-time network.
+    """
+    n_trials, n_bins = len(seqs), max(len(s["t"]) for s in seqs)
+    n_in, n_out = seqs[0][s_key].shape[1], seqs[0][v_key].shape[1]
+    X = np.zeros((n_trials, n_bins, n_in), dtype=np.float32)
+    Y = np.zeros((n_trials, n_bins, n_out), dtype=np.float32)
+    M = np.zeros((n_trials, n_bins), dtype=bool)
+    T = np.full((n_trials, n_bins), np.nan)
+    for i, s in enumerate(seqs):
+        L = len(s["t"])
+        X[i, :L] = np.nan_to_num(s[s_key])
+        Y[i, :L] = np.nan_to_num(s[v_key])
+        M[i, :L] = s["scored"]
+        T[i, :L] = s["t"]
+    return X, Y, M, T

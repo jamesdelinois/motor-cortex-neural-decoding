@@ -7,3 +7,4 @@ h5py<4
 pynwb
 dandi
 ipykernel
+torch
